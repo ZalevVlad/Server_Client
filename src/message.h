@@ -7,8 +7,24 @@
 #include <sstream>
 
 constexpr int TEXT_LIMIT = 256; // CHANGING THIS IS UB
+constexpr int MESSAGE_SIZE = 1024;
 
 class Message {
+    /*
+    Depending on the type of message, the internal structure of
+        _msg will be organized as follows (assuming that char occupies
+        exactly one byte):
+    The first byte always describes the message type: 0 - ERR,
+        1 - TEXT, 2 - SYM_TABLE, 3 - CONNECTIONS, then...
+    TEXT: null terminated string.
+    SYM_TABLE: one byte stores the length of the string - n;
+        then comes the string itself with length n; then one byte
+        describes the table size; then there are pairs of bytes,
+        the first byte of the pair is a character, the second byte
+        is an unsigned char number.
+    CONNECTIONS: sizeof(std::size_t) bytes describing the number of
+        connections.
+     */
     std::vector<char> _msg;
     char _msgType;
 
@@ -23,9 +39,9 @@ class Message {
         return _msg.capacity() - _msg.size();
     }
 
-    const char *bytesToTableMsg(const char *bytes);
+    static std::string bytesToTableMsg(const char *bytes);
 
-    const char *bytesToConnectionsMsg(const char *bytes);
+    static std::string bytesToConnectionsMsg(const char *bytes);
 
 public:
     enum msg_type {
@@ -35,7 +51,9 @@ public:
         CONNECTIONS
     };
 
-    Message(std::size_t max_size, const std::string &text, bool parse = false) : Message(max_size) {
+    /// \param max_size maximal size of message in bytes (>=1)
+    /// \param text text
+    Message(std::size_t max_size, const std::string &text) : Message(max_size) {
         _msgType = TEXT;
         _msg.insert(_msg.end(), _msgType);
 
@@ -44,19 +62,46 @@ public:
         _msg.insert(_msg.end(), '\0');
     }
 
-    Message(std::size_t max_size, const std::string &text, const std::vector<std::pair<char, u_char>> table) : Message(
-            max_size) {
-        _msgType = SYM_TABLE;
-        _msg.insert(_msg.end(), _msgType);
-
-        std::size_t max_rows = std::min(table.size(), (unused() - 1) / 2);
-        for (std::size_t i = 0; i < max_rows; i++) {
-            _msg.insert(_msg.end(), table[i].first);
-            _msg.insert(_msg.end(), table[i].second);
+    /// \param max_size maximal size of message in bytes (>=2)
+    /// \param table_header table header (length must be <= TEXT_LIMIT)
+    /// \param table pairs of symbols and the number of times they appear
+    Message(std::size_t max_size,
+            const std::string &table_header,
+            const std::vector<std::pair<char, u_char>> table) : Message(max_size) {
+        if(1+1+table_header.size()+1+table.size()*2>=TEXT_LIMIT){
+            _msgType = ERR;
+            _msg.insert(_msg.end(), _msgType);
+            auto error_msg = "Error of message size";
+            _msg.insert(_msg.end(), error_msg, error_msg + std::strlen(error_msg));
+            _msg.insert(_msg.end(), '\0');
         }
-        _msg.insert(_msg.end(), '\0');
+        else{
+            _msgType = SYM_TABLE;
+            // stores message type
+            _msg.insert(_msg.end(), _msgType);
+
+            // stores header size
+            _msg.insert(_msg.end(),static_cast<u_char>(table_header.size()));
+
+            // stores header
+            std::size_t max_symbols = std::min(table_header.length(), unused() - 1);
+            _msg.insert(_msg.end(), table_header.begin(), table_header.begin() + max_symbols);
+
+            // stores table_size
+            std::size_t max_rows = std::min(table.size(), (unused() - 1) / 2);
+            _msg.insert(_msg.end(), static_cast<u_char>(max_rows));
+
+            //stores table
+            for (std::size_t i = 0; i < max_rows; i++) {
+                _msg.insert(_msg.end(), table[i].first);
+                _msg.insert(_msg.end(), table[i].second);
+            }
+            _msg.insert(_msg.end(), '\0');
+        }
     }
 
+    /// \param max_size maximal size of message in bytes (>= 1+sizeof(std::size_t))
+    /// \param connections number of connections to say
     Message(std::size_t max_size, std::size_t connections) : Message(max_size) {
         _msgType = CONNECTIONS;
         _msg.insert(_msg.end(), _msgType);
@@ -69,26 +114,17 @@ public:
         }
     }
 
-    static const char *say(const char *bytes) {
-        std::vector<char> msg(bytes, bytes + std::strlen(bytes));
-        char msgType = msg[0];
-        switch (msgType) {
-            case Message::TEXT:
-                return ++bytes;
-            case Message::SYM_TABLE:
-                return "";
-            case Message::CONNECTIONS:
-                return "";
-            default:
-                return "Server: Error";
-        }
-    }
+    static std::string say(const char *bytes);
 
-    const char *c_str() {
+    const char *bytes() const {
         return _msg.data();
     }
 
-    const char type() const {
+    std::size_t length() const {
+        return _msg.size();
+    }
+
+    char type() const {
         return _msgType;
     }
 };

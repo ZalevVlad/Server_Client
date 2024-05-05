@@ -10,29 +10,60 @@
 #include <arpa/inet.h>
 #include <mutex>
 #include <thread>
-#include <ncurses.h>
+#include <atomic>
+#include <csignal>
+
+#include "../message.h"
 
 class Client {
     int _socket;
     sockaddr_in _serverAddress;
-    char _buff[1024];
-    std::mutex _consoleMutex;
-
-     std::mutex _coutMutex;
-     std::mutex _cinMutex;
+    char _buff[MESSAGE_SIZE];
 
     std::string _inputBuffer;
 
-    void readMessages() {
-        char buffer[1024];
-        while (true) {
-            ssize_t bytesReceived = recv(_socket, buffer, 1024, MSG_DONTWAIT);
-            if (bytesReceived > 0) {
-                buffer[bytesReceived] = '\0';
+    std::atomic<bool> _connected = false;
+    std::atomic<bool> _continue = true;
 
-                _coutMutex.lock();
-                std::cout << buffer << std::endl;
-                _coutMutex.unlock();
+    socklen_t _saddrSize;
+
+    void readMessages() {
+        while (_continue.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            ssize_t bytesReceived = recv(_socket, _buff, MESSAGE_SIZE, MSG_DONTWAIT);
+            if (bytesReceived > 0) {
+                _buff[bytesReceived] = '\0';
+                std::cout << Message::say(_buff) << std::endl;
+            }
+        }
+    }
+
+    void reconnect() {
+        close(_socket);
+        _socket = socket(AF_INET, SOCK_STREAM, 0);
+        if(_socket == -1){
+            throw std::runtime_error("Reconnect error: bad socket");
+        }
+
+        while (_continue.load()) {
+            std::cout << "Trying to reconnect..." << std::endl;
+            int res = connect(_socket, (sockaddr *) &_serverAddress, _saddrSize);
+            if (res == 0) {
+                std::cout << "Reconnected" << std::endl;
+                _connected.store(true);
+                break;
+            }
+            std::cout << "Error code: " << errno << std::endl;
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+        }
+    }
+
+    void waitForQuit() {
+        while (_connected == false) {
+            std::getline(std::cin, _inputBuffer);
+            if (_inputBuffer == "q") {
+                _continue.store(false);
+                break;
             }
         }
     }
@@ -43,36 +74,48 @@ public:
         _serverAddress.sin_addr.s_addr = s_addr;
         _serverAddress.sin_port = sin_port;
 
-        if (connect(_socket, (sockaddr*)&_serverAddress, sizeof(_serverAddress)) == -1) {
+        _saddrSize = sizeof(_serverAddress);
+
+        if (connect(_socket, (sockaddr *) &_serverAddress, _saddrSize) == -1) {
             throw std::runtime_error("Connection to server failed");
         }
+        _connected.store(true);
     }
 
-    void run(){
+    void run() {
         std::thread readMessagesThread(&Client::readMessages, this);
 
-        std::string message =  "";
-        while (message!="q") {
-//            _coutMutex.lock();
-//            std::cout << "> ";
-//            _coutMutex.unlock();
+        while (_continue) {
+            std::getline(std::cin, _inputBuffer);
+            if (_inputBuffer == "q") {
+                _continue = false;
+                std::cout << "Stopping..." << std::endl;
+            } else {
+                if (getpeername(_socket, (sockaddr *) &_serverAddress, &_saddrSize) < 0) {
+                    _connected.store(false);
+                }
 
-            _cinMutex.lock();
-            std::getline(std::cin, message);
-            _cinMutex.unlock();
+                if (_connected) {
+                    std::size_t msg_size = std::strlen(_inputBuffer.c_str());
+                    std::size_t bytesSent = send(_socket, _inputBuffer.c_str(), msg_size, MSG_NOSIGNAL);
+                    if (bytesSent != msg_size && (errno == EPIPE || errno == ECONNRESET)) {
+                        _connected.store(false);
+                    }
+                }
 
-//            _inputBuffer += message + "\n"; // new
-//            _consoleMutex.lock();
-//            std::cout << "> " << _inputBuffer;
-//            _consoleMutex.unlock();
+                if (_connected.load() == false){
+                    std::cout << "Lost connection to the server" << std::endl;
+                    std::thread waitForQuitThread(&Client::waitForQuit, this);
+                    waitForQuitThread.detach();
 
-            send(_socket, message.c_str(), message.length() + 1, 0);
-//            _inputBuffer.clear(); // new
+                    reconnect();
+                }
+            }
         }
-
         readMessagesThread.join();
         close(_socket);
     }
+
 };
 
 #endif //SERVER_CLIENT_CLIENT_H
